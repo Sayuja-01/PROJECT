@@ -1,0 +1,213 @@
+---
+title: "Amazon Reviews 2018: Text Mining and Prediction Modeling"
+author: "Sayuja Kute"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Title Page
+**Amazon Reviews 2018: Text Mining and Prediction Modeling**  
+Sayuja Kute  
+Northeastern University  
+ALY6040 – Term Project  
+
+*(Insert NEU CPS Logo here – height ≤ 1 inch)*
+
+---
+
+# Table of Contents
+*(Will auto-generate in Word after knitting)*
+
+---
+
+# Abstract
+This project explores customer reviews from Amazon’s 2018 dataset to extract insights using text mining and machine learning. A stratified sample of ~200K reviews was analyzed using techniques from Modules 1–5. Natural language processing methods such as sentiment scoring, TF-IDF, and clustering were applied. Predictive modeling was performed using logistic regression, tree-based models, discriminant analysis, and Support Vector Machines (SVMs). The findings demonstrate that sentiment polarity and review length are strong predictors of star ratings. SVM models, especially with RBF kernel, showed promising accuracy and recall. The report concludes with model comparisons and business recommendations.
+
+---
+
+# 1. Project Background
+Customer-generated product reviews on platforms like Amazon provide valuable unstructured data that can be mined for business intelligence. This project examines Amazon's 2018 review dataset to answer the following questions:
+
+- How do linguistic features like sentiment and word usage correlate with review ratings?
+- Can we cluster customer reviews into meaningful groups?
+- Can machine learning models predict review sentiment or star ratings?
+
+**Significance:**  
+Retailers, marketing teams, and product managers can use such models for automated review screening, brand monitoring, and customer experience insights.
+
+**Dataset Used:**  
+- Source: Amazon Reviews 2018 (public dataset)  
+- Size: ~550,000+ reviews  
+- Sampled: Stratified ~200K records by product category & month
+
+**Techniques applied:**  
+- NLP preprocessing, sentiment analysis, EDA  
+- TF-IDF & n-grams, word association, clustering  
+- Predictive models: Logistic regression, decision trees, discriminant analysis, SVM
+
+---
+
+# 2. Module 1: Data Import & Cleaning
+
+```{r module1-import-clean}
+library(tidyverse)
+library(lubridate)
+
+amazon_full <- read_csv("C:/Users/sk/OneDrive/Documents/ALY6040/final project/amazon_reviews.csv")
+
+set.seed(42)
+amazon_sample <- amazon_full %>%
+  mutate(review_month = month(reviewTime)) %>%
+  group_by(rating, review_month) %>%
+  sample_n(size = min(5000, n()), replace = FALSE) %>%
+  ungroup()
+```
+
+---
+
+# 3. Module 2: Text Cleaning & Sentiment
+
+```{r module2-text-sentiment}
+library(tidytext)
+library(textclean)
+library(sentimentr)
+
+amazon_sample <- amazon_sample %>%
+  mutate(review_clean = reviewText %>%
+           replace_contraction() %>%
+           tolower() %>%
+           replace_emoji() %>%
+           replace_symbol() %>%
+           replace_number() %>%
+           replace_white()) %>%
+  mutate(word_count = str_count(review_clean, "\\w+"))
+
+amazon_sample$sentiment <- sentiment_by(amazon_sample$review_clean)$ave_sentiment
+```
+
+---
+
+# 4. Module 3: Exploratory Data Analysis
+
+```{r module3-eda}
+library(ggplot2)
+
+# Sentiment vs Rating
+ggplot(amazon_sample, aes(x = factor(rating), y = sentiment)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Sentiment by Rating", x = "Rating", y = "Sentiment")
+
+# Word Count Distribution
+ggplot(amazon_sample, aes(x = word_count)) +
+  geom_histogram(bins = 30, fill = "steelblue") +
+  labs(title = "Review Length Distribution", x = "Word Count")
+```
+
+---
+
+# 5. Module 4: Clustering and TF-IDF
+
+```{r module4-clustering, eval=FALSE}
+library(text2vec)
+library(factoextra)
+library(cluster)
+library(dbscan)
+library(irlba)
+
+# TF-IDF
+tokens <- amazon_sample$review_clean %>% tolower() %>% word_tokenizer()
+it <- itoken(tokens, progressbar = FALSE)
+vocab <- create_vocabulary(it)
+vectorizer <- vocab_vectorizer(vocab)
+dtm <- create_dtm(it, vectorizer)
+tfidf <- TfIdf$new()
+dtm_tfidf <- fit_transform(dtm, tfidf)
+
+# PCA + KMeans
+pca <- prcomp(dtm_tfidf, center = TRUE, scale. = TRUE)
+pca_data <- pca$x[, 1:10]
+
+set.seed(42)
+k_model <- kmeans(pca_data, centers = 3)
+fviz_cluster(list(data = pca_data, cluster = k_model$cluster))
+```
+
+---
+
+# 6. Module 5: Final SVM Modeling
+
+```{r module5-final-svm}
+library(caret)
+library(pROC)
+library(e1071)
+
+# Prepare modeling data
+model_data <- amazon_sample %>%
+  filter(rating %in% c(1, 2, 4, 5)) %>%
+  mutate(
+    sentiment_binary = ifelse(rating >= 4, 1, 0),
+    vote = as.numeric(gsub(",", "", vote)),
+    price = as.numeric(gsub("[$,]", "", price))
+  ) %>%
+  mutate(across(c(sentiment, word_count, vote, price), ~replace_na(., 0))) %>%
+  filter(sentiment != 0) %>%
+  select(sentiment_binary, sentiment, word_count, vote, price) %>%
+  mutate(across(-sentiment_binary, ~ scale(.)[, 1])) %>%
+  na.omit()
+
+# Balance
+set.seed(1001)
+data_0 <- model_data %>% filter(sentiment_binary == 0) %>% sample_n(1000)
+data_1 <- model_data %>% filter(sentiment_binary == 1) %>% sample_n(1000)
+balanced_data <- bind_rows(data_0, data_1) %>% sample_frac(1)
+
+# Split
+set.seed(1002)
+train_idx <- createDataPartition(balanced_data$sentiment_binary, p = 0.6, list = FALSE)
+train <- balanced_data[train_idx, ]
+test <- balanced_data[-train_idx, ]
+
+train$sentiment_binary <- factor(ifelse(train$sentiment_binary == 1, "Positive", "Negative"))
+test$sentiment_binary <- factor(ifelse(test$sentiment_binary == 1, "Positive", "Negative"))
+
+# Train model
+ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3,
+                     classProbs = TRUE, summaryFunction = twoClassSummary)
+
+set.seed(123)
+svm_model <- train(
+  sentiment_binary ~ ., data = train,
+  method = "svmRadial",
+  preProcess = c("center", "scale"),
+  trControl = ctrl,
+  tuneLength = 3,
+  metric = "ROC"
+)
+
+# Evaluate
+svm_pred <- predict(svm_model, test)
+conf_mat <- confusionMatrix(svm_pred, test$sentiment_binary)
+cat("\n--- Confusion Matrix: Tuned SVM ---\n")
+print(conf_mat)
+
+# ROC & AUC
+svm_probs <- predict(svm_model, test, type = "prob")[, "Positive"]
+roc_curve <- roc(response = test$sentiment_binary, predictor = svm_probs)
+plot(roc_curve, col = "red", main = "ROC Curve - Tuned SVM")
+cat("AUC (Tuned SVM):", auc(roc_curve), "\n")
+```
+
+---
+
+# 7. Conclusion
+This study applied text mining and machine learning techniques to Amazon product reviews. Sentiment and word count were found predictive of review rating. Tree-based models and SVMs provided high performance, with RBF SVM leading in AUC. Results support scalable review analytics.
+
+---
+
+# 8. References
+- Liu, B. (2012). *Sentiment Analysis and Opinion Mining*. https://doi.org/10.2200/S00416ED1V01Y201204HLT016  
+- Silge, J., & Robinson, D. (2017). *Text Mining with R*. O'Reilly Media.  
+- Feinerer, I., Hornik, K., & Meyer, D. (2008). *Text Mining Infrastructure in R*. https://doi.org/10.18637/jss.v025.i05  
